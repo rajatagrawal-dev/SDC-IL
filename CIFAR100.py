@@ -14,6 +14,8 @@ import torch.utils.data as data
 
 import pdb
 
+from sklearn.utils import shuffle
+
 
 class CIFAR10(data.Dataset):
     """`CIFAR10 <https://www.cs.toronto.edu/~kriz/cifar.html>`_ Dataset.
@@ -51,13 +53,14 @@ class CIFAR10(data.Dataset):
         'md5': '5ff9c542aee3614f3951f8cda6e48888',
     }
 
-    def __init__(self, root, train=True,
+    def __init__(self, root, train=True, episodic_memory = None,
                  transform=None, target_transform=None,
                  download=False, index=None,num_instance_per_class=0):
         self.root = os.path.expanduser(root)
         self.transform = transform
         self.target_transform = target_transform
         self.train = train  # training set or test set
+        self.index = index
 
         # if download:
         #     self.download()
@@ -103,6 +106,13 @@ class CIFAR10(data.Dataset):
         else:
             self.data,self.targets = self.RandomExempalers(self.data,self.targets,index,num_instance_per_class)
 
+        if episodic_memory != None:
+            ep_data, ep_targets = episodic_memory
+
+            if len(ep_data) > 0:
+                self.data = np.vstack((self.data,ep_data))
+                self.targets = np.hstack((self.targets,ep_targets))
+        
         self._load_meta()
 
     def RandomPercentage(self, data,targets,index):
@@ -118,6 +128,7 @@ class CIFAR10(data.Dataset):
                 targets_tmp = np.hstack((targets_tmp,targets[ind_cl]))
 
         return data_tmp,targets_tmp
+
     def RandomExempalers(self, data,targets,index,num):
         data_tmp = []
         targets_tmp = []
@@ -131,6 +142,22 @@ class CIFAR10(data.Dataset):
                 targets_tmp = np.hstack((targets_tmp,targets[ind_cl]))
                 
         return data_tmp,targets_tmp
+
+    def GetEpisodicMemory(self, num):
+        data, targets = shuffle(self.data, self.targets, random_state=0)
+        data_tmp = []
+        targets_tmp = []
+        for i in self.index:
+            ind_cl = np.where(i == targets)[0][:num]
+            if data_tmp==[]:
+                data_tmp = data[ind_cl]
+                targets_tmp = targets[ind_cl]
+            else:
+                data_tmp = np.vstack((data_tmp,data[ind_cl]))
+                targets_tmp = np.hstack((targets_tmp,targets[ind_cl]))
+                
+        return data_tmp,targets_tmp
+
     def _load_meta(self):
         path = os.path.join(self.root, self.base_folder, self.meta['filename'])
         # if not check_integrity(path, self.meta['md5']):
@@ -222,3 +249,43 @@ class CIFAR100(CIFAR10):
         'key': 'fine_label_names',
         'md5': '7973b15100ade9c7d40fb424638fde48',
     }
+
+class EpisodicMemory(data.Dataset):
+    def __init__(self, transform = None, target_transform = None):
+        self.data = []
+        self.targets = []
+        self.transform = transform
+        self.target_transform = target_transform
+
+    def __getitem__(self, index):
+        """
+        Args:
+            index (int): Index
+        Returns:
+            tuple: (image, target) where target is index of the target class.
+        """
+        img, target = self.data[index], self.targets[index]
+
+        # doing this so that it is consistent with all other datasets
+        # to return a PIL Image
+        img = Image.fromarray(img)
+
+        if self.transform is not None:
+            img = self.transform(img)
+
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+
+        return img, target
+
+    def extend(self, newData, newTargets):
+        if self.data==[]:
+            self.data = newData
+            self.targets = newTargets
+        else:
+            self.data = np.vstack((self.data,newData))
+            self.targets = np.hstack((self.targets,newTargets))
+
+    def __len__(self):
+        return len(self.data)
+

@@ -151,15 +151,17 @@ def train_fun(args, train_loader, feat_loader, current_task, fisher={}, prototyp
         else:
             print (' Oops!  That was no valid models. ')
 
+    emstring = '_em_' if args.em == True else ''
+
     if args.method != 'Independent' and current_task > 0:
-        model = torch.load(os.path.join(log_dir, args.method + '_' + args.exp +
+        model = torch.load(os.path.join(log_dir, args.method + emstring + args.exp +
                                         '_task_' + str(current_task-1) + '_%d_model.pkl' % int(args.epochs-1)))
         model_old = deepcopy(model)
         model_old.eval()
         model_old = freeze_model(model_old)
 
     model = model.cuda()
-    torch.save(model, os.path.join(log_dir, args.method + '_' +
+    torch.save(model, os.path.join(log_dir, args.method + emstring +
                                    args.exp + '_task_' + str(current_task) + '_pre_model.pkl'))
     print('initial model is save at %s' % log_dir)
 
@@ -227,8 +229,8 @@ def train_fun(args, train_loader, feat_loader, current_task, fisher={}, prototyp
 
             loss.backward()
             optimizer.step()
-            running_loss += loss.data[0]
-            running_lwf += loss_aug.data[0]
+            running_loss += loss.data.item()
+            running_lwf += loss_aug.data.item()
             if epoch == 0 and i == 0:
                 print(50*'#')
                 print('Train Begin -- HA-HA-HA')
@@ -237,7 +239,7 @@ def train_fun(args, train_loader, feat_loader, current_task, fisher={}, prototyp
               % (epoch + 1,  running_loss, running_lwf, inter_, dist_ap, dist_an))
 
         if epoch % args.save_step == 0:
-            torch.save(model, os.path.join(log_dir, args.method + '_' +
+            torch.save(model, os.path.join(log_dir, args.method + emstring +
                                            args.exp + '_task_' + str(current_task) + '_%d_model.pkl' % epoch))
 
     if args.method == 'EWC' or args.method == 'MAS':
@@ -308,6 +310,7 @@ if __name__ == '__main__':
     parser.add_argument('-vez', default=0, type=int, help='vez')
     parser.add_argument('-task', default=0, type=int, help='vez')
     parser.add_argument('-base', default=50, type=int, help='vez')
+    parser.add_argument('--em', dest='em', default=True)
 
     # parser.add_argument('-evel', action='store_true')
 
@@ -415,7 +418,7 @@ if __name__ == '__main__':
         num_classes = 100
 
     num_task = args.task
-    num_class_per_task = (num_classes-args.base)/(num_task-1)
+    num_class_per_task = (num_classes-args.base)//(num_task-1)
 
     np.random.seed(args.seed)
     random_perm = np.random.permutation(num_classes)
@@ -423,7 +426,13 @@ if __name__ == '__main__':
 
     fisher = {}
     prototype = {}
+
+    episodic_memory_data = []
+    episodic_memory_targets = []
+
     for i in range(num_task):
+        episodic_memory = (episodic_memory_data,episodic_memory_targets) if args.em == True else None
+
         if i == 0:
             class_index = random_perm[:args.base]
         else:
@@ -431,10 +440,17 @@ if __name__ == '__main__':
                                       (i-1)*num_class_per_task:args.base+i*num_class_per_task]
         if args.data == 'cifar100':
             trainfolder = CIFAR100(
-                root=traindir, train=True, download=True, transform=transform_train, index=class_index)
+                root=traindir, train=True, episodic_memory=episodic_memory, download=True, transform=transform_train, index=class_index)
         else:
             trainfolder = ImageFolder(
                 traindir, transform_train, index=class_index)
+
+        curr_ep_data, curr_ep_targets = trainfolder.GetEpisodicMemory(20)
+        if i == 0:
+            episodic_memory_data, episodic_memory_targets = curr_ep_data, curr_ep_targets
+        else:
+            episodic_memory_data = np.vstack((episodic_memory_data, curr_ep_data))
+            episodic_memory_targets = np.hstack((episodic_memory_targets, curr_ep_targets))
 
         train_loader = torch.utils.data.DataLoader(
             trainfolder, batch_size=args.BatchSize,

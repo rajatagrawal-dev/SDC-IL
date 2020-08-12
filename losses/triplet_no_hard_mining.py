@@ -38,6 +38,6 @@ class TripletLossNoHardMining(nn.Module):
         y = Variable(y)
         loss = self.ranking_loss(dist_an, dist_ap, y)
         prec = (dist_an.data > dist_ap.data).sum() * 1. / y.size(0)
-        dist_p = torch.mean(dist_ap).data[0]
-        dist_n = torch.mean(dist_an).data[0]
+        dist_p = torch.mean(dist_ap).data.item()
+        dist_n = torch.mean(dist_an).data.item()
         return loss, prec, dist_p, dist_n

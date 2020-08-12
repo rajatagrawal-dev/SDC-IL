@@ -182,7 +182,7 @@ if args.data == 'imagenet_sub' or args.data == 'imagenet_full':
 
 
 num_task = args.task
-num_class_per_task = (num_classes-args.base)/(num_task-1)
+num_class_per_task = (num_classes-args.base)//(num_task-1)
 np.random.seed(args.seed)
 random_perm = np.random.permutation(num_classes)
 
