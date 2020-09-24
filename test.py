@@ -4,7 +4,7 @@ import argparse
 
 import torch
 from torch.backends import cudnn
-from evaluations import extract_features, pairwise_distance
+from evaluations import extract_features, pairwise_distance, get_mean_example, get_mean_example2,get_close_embeddings
 import os
 import numpy as np
 from utils import to_numpy
@@ -16,7 +16,8 @@ from sklearn.metrics.pairwise import euclidean_distances
 import random
 from CIFAR100 import CIFAR100
 import pdb
-
+from embed_transformation import train_mapping
+from scipy import spatial
 
 #from tensorboardX import SummaryWriter
 #writer = SummaryWriter('logs')
@@ -26,11 +27,33 @@ def displacement(Y1, Y2, embedding_old, sigma):
     distance = np.sum((np.tile(Y1[None, :, :], [embedding_old.shape[0], 1, 1])-np.tile(
         embedding_old[:, None, :], [1, Y1.shape[0], 1]))**2, axis=2)
     W = np.exp(-distance/(2*sigma ** 2))  # +1e-5
+    W = weight_update(W, K=len(W[0]))
     W_norm = W/np.tile(np.sum(W, axis=1)[:, None], [1, W.shape[1]])
     displacement = np.sum(np.tile(W_norm[:, :, None], [
                           1, 1, DY.shape[1]])*np.tile(DY[None, :, :], [W.shape[0], 1, 1]), axis=1)
     return displacement
 
+def weight_update(W, K):
+    bottomK = np.argpartition(W, -K)[:,:-K]
+    for i in range(len(W)):
+        W[i][bottomK[i]] = 0
+
+    return W
+
+def knn_displacement(Y1, Y2, embedding_old, K=100):
+    K = Y1.shape[0]
+    DY = Y2-Y1
+    tree = spatial.KDTree(Y1, leafsize=K)
+    closest_points = tree.query(embedding_old,K)[1]
+    displacement = np.mean(DY[closest_points],axis=1)
+    return displacement
+
+def get_mapping_function(Y1, Y2, embedding_old):
+    DY = Y2-Y1
+    displacement = train_mapping(Y1, DY, embedding_old)
+    #new_embeddings = mapping_model(embedding_old)
+    print(displacement.size())
+    return displacement.numpy()
 
 cudnn.benchmark = True
 parser = argparse.ArgumentParser(description='PyTorch Testing')
@@ -193,6 +216,8 @@ class_mean = []
 class_std = []
 class_label = []
 class_mean_mapping = []
+class_mean_example = []
+class_embed_dist = []
 
 for task_id in range(num_task):
 
@@ -202,6 +227,7 @@ for task_id in range(num_task):
     else:
         index_train = random_perm[args.base +
                                   (task_id-1)*num_class_per_task:args.base+task_id*num_class_per_task]
+	#index_train = random_perm[:args.base+task_id*num_class_per_task]
 
     if args.data == 'cifar100':
         trainfolder = CIFAR100(root=traindir, train=True, download=True,
@@ -225,23 +251,88 @@ for task_id in range(num_task):
     val_embeddings_cl, val_labels_cl = extract_features(
         model, test_loader, print_freq=32, metric=None)
 
+    class_data = []
+    for i, data in enumerate(train_loader,0):
+        inputs, pids = data
+        if class_data == []:
+            class_data = inputs.numpy()
+        else:
+            class_data = np.vstack((class_data, inputs.numpy()))
+    
+    #print("class data shape is: ", class_data.shape)
+    #exit(1)
+
+    #class_data = class_data[ind_cl]
+
     # Test for each task
+    #class_label = []
+    #class_mean = []
+    k = 200
     for i in index_train:
         ind_cl = np.where(i == train_labels_cl)[0]
         embeddings_tmp = train_embeddings_cl[ind_cl]
+        data_tmp = class_data[ind_cl]
+	#mean_example = np.mean(class_data, axis=0)
         class_label.append(i)
         class_mean.append(np.mean(embeddings_tmp, axis=0))
+	#close_to_mean_dist, close_to_mean_embeddings = get_close_embeddings(embeddings_tmp,k)
+##	
+	mean_example = get_mean_example2(embeddings_tmp, data_tmp, class_mean[-1].reshape(1,-1))
+	#class_mean_example.append(mean_example)
+	#class_embed_dist = np.append(class_embed_dist, close_to_mean_dist)
+	if class_mean_example == []:
+	    #class_mean_example = close_to_mean_embeddings
+	    class_mean_example = mean_example
+	else:
+	    #class_mean_example = np.vstack((class_mean_example, close_to_mean_embeddings))
+	    class_mean_example = np.vstack((class_mean_example, mean_example))
 
     if task_id > 0 and args.mapping_test:
-        model_old = torch.load(models[task_id-1])
-        train_embeddings_cl_old, train_labels_cl_old = extract_features(
-            model_old, train_loader, print_freq=32, metric=None)
+	model_old = torch.load(models[task_id-1])
+	mean_X = torch.Tensor(class_mean_example[:(args.base+(task_id-1)*num_class_per_task)*k])
+	mean_Y = torch.Tensor(np.repeat(class_label[:args.base+(task_id-1)*num_class_per_task],k))
+	#print("X shape:", mean_X.shape)
+	#print("Y shape:", mean_Y.shape)
+	mean_ds = torch.utils.data.TensorDataset(mean_X, mean_Y)
+	mean_dl = torch.utils.data.DataLoader(mean_ds,shuffle=False, drop_last=False)
+	mean_output, mean_output_label = extract_features(model, mean_dl, print_freq=32, metric=None)
+	class_wise_mean = []
+	for i in range(args.base+(task_id-1)*num_class_per_task):
+	    curr_mean = np.average(mean_output[i*k:(i+1)*k],axis=0)
+	    class_wise_mean.append(curr_mean)
+	#print(mean_output.shape)
+	#print(mean_output)
+	class_mean[:args.base+(task_id-1)*num_class_per_task] = class_wise_mean
 
-        MU = np.asarray(class_mean[:args.base+(task_id-1)*num_class_per_task])
-        gap = displacement(train_embeddings_cl_old,
-                           train_embeddings_cl, MU, args.sigma_test)
-        MU += gap
-        class_mean[:args.base+(task_id-1)*num_class_per_task] = MU
+    #if task_id > 0 and args.mapping_test:
+    #    model_old = torch.load(models[task_id-1])
+    #    train_embeddings_cl_old, train_labels_cl_old = extract_features(
+    #        model_old, train_loader, print_freq=32, metric=None)
+
+    #    MU = np.asarray(class_mean[:args.base+(task_id-1)*num_class_per_task])
+    #    #if task_id==1:
+    #    #    np.savetxt('task_1_old_embed.txt',train_embeddings_cl_old)
+    #    #    np.savetxt('task_1_new_embed.txt',train_embeddings_cl)
+    #    #    np.savetxt('task_1_MU.txt',MU)
+
+    #    #gap = get_mapping_function(train_embeddings_cl_old,
+    #    #                   train_embeddings_cl, MU)
+    #    gap = displacement(train_embeddings_cl_old,
+    #                       train_embeddings_cl, class_mean_example, args.sigma_test)
+    #    
+    #    class_mean_example += gap
+    #    new_means = []
+    #    weights = np.exp(-class_embed_dist**2/(2*args.sigma_test*args.sigma_test))
+    #    for i in range(args.base+(task_id-1)*num_class_per_task):
+    #        curr_weights = weights[i*k:(i+1)*k]
+    #        #curr_weights[-1]=1
+    #        curr_mean = np.average(class_mean_example[i*k:(i+1)*k],axis=0)
+    #        new_means.append(curr_mean)
+    #    new_means = np.asarray(new_means)
+    #    #gap = displacement(train_embeddings_cl_old,
+    #    #                   train_embeddings_cl, MU, args.sigma_test)
+    #    #MU += gap
+    #    class_mean[:args.base+(task_id-1)*num_class_per_task] = new_means
 
     embedding_mean_old = []
     embedding_std_old = []
